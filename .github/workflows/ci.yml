@@ -1,0 +1,94 @@
+name: PhoneBridge CI
+
+on:
+  push:
+    branches:
+      - main
+      - "work/**"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phonebridge-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python verification (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: windows/pyproject.toml
+
+      - name: Install project and development tools
+        working-directory: windows
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+
+      - name: Run complete repository verification
+        run: python tools/verify.py
+
+      - name: Run native virtual-camera source safety tests explicitly
+        run: python -m pytest windows/tests/test_vcam_host_safety.py -q
+
+  android:
+    name: Android debug APK build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew --no-daemon assembleDebug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: phonebridge-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  native-virtual-camera:
+    name: Windows Media Foundation virtual-camera compile
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Configure x64 native build
+        run: cmake -S windows-native/vcam-poc -B build/vcam -A x64
+
+      - name: Build Release DLL and host
+        run: cmake --build build/vcam --config Release --parallel 4
+
+      - name: Verify expected native outputs
+        shell: pwsh
+        run: |
+          $dll = "build/vcam/Release/PhoneBridgeVcamSource.dll"
+          $host = "build/vcam/Release/vcam_host.exe"
+          if (!(Test-Path $dll)) { throw "Missing native camera DLL: $dll" }
+          if (!(Test-Path $host)) { throw "Missing native camera host: $host" }
+          Get-Item $dll, $host | Select-Object Name, Length
